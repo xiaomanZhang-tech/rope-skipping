@@ -1,0 +1,7 @@
+# 证书（本地生成，不用提交）
+server.crt
+server.key
+
+# 系统
+.DS_Store
+*.log

@@ -1,0 +1,17 @@
+{
+  "name": "爱上跳绳",
+  "short_name": "爱上跳绳",
+  "description": "AI智能跳绳计数，一分钟体质测试训练",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F0F8FF",
+  "theme_color": "#4A90D9",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Ccircle cx='96' cy='96' r='96' fill='%234A90D9'/%3E%3Ctext x='96' y='130' font-size='100' text-anchor='middle' fill='white'%3E🏃%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}

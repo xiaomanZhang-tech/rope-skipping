@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>爱上跳绳 - AI智能计数</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ========== 首页 ========== -->
+<div id="page-home" class="page active">
+  <div class="home-header">
+    <div class="home-logo">🏃</div>
+    <h1 class="home-title">爱上跳绳</h1>
+    <p class="home-subtitle">AI智能识别 · 无需硬件 · 精准计数</p>
+  </div>
+  <div class="home-main">
+    <div class="home-card" onclick="navigateTo('prepare')">
+      <div class="home-card-icon">⏱️</div>
+      <div class="home-card-text">
+        <div class="home-card-title">计时跳绳</div>
+        <div class="home-card-desc">一分钟模式 · 体质测试专用</div>
+      </div>
+      <div class="home-card-arrow">›</div>
+    </div>
+    <div class="home-card secondary" onclick="navigateTo('history')">
+      <div class="home-card-icon">📊</div>
+      <div class="home-card-text">
+        <div class="home-card-title">历史记录</div>
+        <div class="home-card-desc">查看训练成绩和趋势</div>
+      </div>
+      <div class="home-card-arrow">›</div>
+    </div>
+  </div>
+  <div class="home-footer">
+    <p>AI骨骼识别技术 · 计数准确率 ≥ 97%</p>
+    <p>适配学生体质测试 · 适合各年龄段</p>
+  </div>
+</div>
+
+<!-- ========== 准备界面 ========== -->
+<div id="page-prepare" class="page">
+  <div class="top-bar">
+    <button class="top-btn" onclick="navigateTo('home')">‹ 返回</button>
+    <span class="top-title">一分钟跳绳</span>
+    <button class="top-btn" onclick="showHelp()">帮助</button>
+  </div>
+  <div class="prepare-content">
+    <div id="camera-preview" class="camera-preview">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="pose-canvas"></canvas>
+      <div id="camera-placeholder" class="camera-placeholder">
+        <div class="placeholder-icon">📷</div>
+        <p>请授予相机权限以开始计数</p>
+      </div>
+    </div>
+    <div class="prepare-info">
+      <div class="prepare-tip">
+        <span class="tip-icon">💡</span>
+        <span>将手机放置在可完整捕捉全身的位置（距离1.5-2米）</span>
+      </div>
+      <div class="prepare-tip">
+        <span class="tip-icon">🏃</span>
+        <span>普通跳绳 / 空手模拟均可使用</span>
+      </div>
+      <div class="prepare-tip">
+        <span class="tip-icon">🔒</span>
+        <span>仅获取相机权限，不涉及其他隐私数据</span>
+      </div>
+    </div>
+    <div id="permission-prompt" class="permission-prompt hidden">
+      <p>无相机权限无法使用计数功能</p>
+      <button class="btn btn-secondary" onclick="requestCamera()">前往开启权限</button>
+    </div>
+    <div class="prepare-actions">
+      <button id="btn-start" class="btn btn-primary btn-large" onclick="startExercise()" disabled>
+        <span id="btn-start-text">准备中...</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 运动界面 ========== -->
+<div id="page-exercise" class="page">
+  <div class="exercise-bg"></div>
+  <div class="exercise-overlay">
+    <video id="exercise-video" autoplay playsinline muted></video>
+    <canvas id="exercise-canvas"></canvas>
+  </div>
+  <div class="exercise-ui">
+    <div class="exercise-timer" id="timer-display">60</div>
+    <div class="exercise-label">剩余时间</div>
+    <div class="exercise-count" id="count-display">0</div>
+    <div class="exercise-label">有效跳绳</div>
+    <div class="exercise-status" id="exercise-status">准备开始</div>
+    <div class="exercise-controls">
+      <button id="btn-pause" class="btn btn-control" onclick="togglePause()">⏸ 暂停</button>
+      <button id="btn-restart" class="btn btn-control hidden" onclick="confirmRestart()">🔄 重新开始</button>
+      <button id="btn-resume" class="btn btn-control hidden" onclick="togglePause()">▶ 继续</button>
+    </div>
+    <!-- 调试面板 -->
+    <div id="dbg-panel" class="dbg-panel" style="display:none;">
+      <span>lift:<b id="dbg-lift">--</b></span>
+      <span>th:<b id="dbg-th">--</b></span>
+      <span>gnd:<b id="dbg-gnd">--</b></span>
+      <span>md:<b id="dbg-mdl">--</b></span>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 结算界面 ========== -->
+<div id="page-result" class="page">
+  <div class="result-bg"></div>
+  <div class="result-content">
+    <div class="result-title">挑战完成！</div>
+    <div class="result-stars" id="result-stars"></div>
+    <div class="result-count" id="result-count">0</div>
+    <div class="result-label">总跳数</div>
+    <div class="result-stats">
+      <div class="stat-item">
+        <div class="stat-value" id="result-avg">0.0</div>
+        <div class="stat-label">平均跳/秒</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="result-cal">0</div>
+        <div class="stat-label">消耗卡路里</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value">60s</div>
+        <div class="stat-label">运动时长</div>
+      </div>
+    </div>
+    <div class="result-message" id="result-message">继续加油，突破自我～</div>
+    <div class="result-actions">
+      <button class="btn btn-primary" onclick="navigateTo('prepare')">🔄 重新挑战</button>
+      <button class="btn btn-secondary" onclick="checkIn()">📅 打卡</button>
+      <button class="btn btn-secondary" onclick="shareResult()">📤 分享</button>
+      <button class="btn btn-outline" onclick="navigateTo('history')">📊 查看历史</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 历史记录界面 ========== -->
+<div id="page-history" class="page">
+  <div class="top-bar">
+    <button class="top-btn" onclick="navigateTo('home')">‹ 返回</button>
+    <span class="top-title">历史记录</span>
+    <button class="top-btn" onclick="clearHistory()">🗑️ 清空</button>
+  </div>
+  <div class="history-content" id="history-content">
+    <div class="history-empty">
+      <div class="empty-icon">📋</div>
+      <p>暂无记录</p>
+      <p class="empty-sub">完成一分钟跳绳后，成绩将自动保存</p>
+      <button class="btn btn-primary" onclick="navigateTo('prepare')">开始第一次训练</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 帮助弹窗 ========== -->
+<div id="modal-help" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-title">使用说明</div>
+    <div class="modal-body">
+      <p>1️⃣ 将手机放在地面或桌面，靠在墙上固定</p>
+      <p>2️⃣ 后退至可完整拍摄全身的位置（约1.5-2米）</p>
+      <p>3️⃣ 点击"开始"，在60秒内尽情跳跃</p>
+      <p>4️⃣ 空手跳跃、握绳跳跃均可准确识别</p>
+      <p>5️⃣ 结束查看成绩，可打卡/分享</p>
+      <hr>
+      <p>💡 AI通过识别脚踝、膝盖等骨骼点运动判定跳跃</p>
+      <p>💡 确保全身在画面中，光线充足效果更佳</p>
+      <p>💡 保持身体直立，避免大幅度左右晃动</p>
+    </div>
+    <button class="btn btn-primary" onclick="closeModal('modal-help')">知道了</button>
+  </div>
+</div>
+
+<!-- ========== 通用弹窗 ========== -->
+<div id="modal-generic" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-title" id="modal-title"></div>
+    <div class="modal-body" id="modal-body"></div>
+    <button class="btn btn-primary" id="modal-btn" onclick="closeModal('modal-generic')">确定</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
