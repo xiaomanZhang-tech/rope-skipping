@@ -54,12 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
   // 加载CDN AI库（库加载完成后自动调用 preloadDetector）
   if (window._bootLibs) {
-    window._bootLibs(function(success) {
+    window._bootLibs(function(success, failInfo) {
       if (success) preloadDetector();
       else {
         STATE.motionMode = true;
         STATE.modelLoadAttempted = true;
-        setModelStatus('CDN加载失败，使用运动检测备用方案');
+        setModelStatus('CDN加载失败[' + failInfo + ']，使用运动检测备用方案');
       }
     });
   } else {
@@ -215,7 +215,7 @@ function requestCamera() {
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
-  setModelStatus('正在加载AI模型...');
+  setModelStatus('正在加载AI模型(约4.4MB)...');
 
   try {
     // 使用自托管模型文件，不依赖 tfhub.dev 外网访问
@@ -223,9 +223,12 @@ async function preloadDetector() {
       modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
       modelUrl: 'models/movenet/model.json'
     };
-    STATE.detector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet, cfg
-    );
+    STATE.detector = await Promise.race([
+      poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('超时(>30s)')), 30000)
+      )
+    ]);
     STATE.modelLoadAttempted = true;
     STATE.motionMode = false;
     setModelStatus('✓ AI骨骼识别 已就绪');
@@ -234,7 +237,7 @@ async function preloadDetector() {
     STATE.modelLoadAttempted = true;
     STATE.detector = null;
     STATE.motionMode = true;
-    setModelStatus('AI模型加载失败，使用运动检测备用方案');
+    setModelStatus('AI模型加载失败(' + (err.message || err) + ')，使用运动检测备用方案');
     console.error('Model load failed:', err);
   }
 
