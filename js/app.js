@@ -211,7 +211,7 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载（移动端CPU推理，多线路容错） ============
+// ============ AI 模型加载（WebGL优先，出错降级CPU + 多线路容错） ============
 var _modelDiag = '';
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
@@ -220,20 +220,6 @@ async function preloadDetector() {
   _modelDiag = '';
 
   var isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
-  // 移动端主动使用CPU后端（部分手机WebGL与TF.js不兼容）
-  if (isMobile) {
-    if (typeof tf !== 'undefined' && tf.getBackend() !== 'cpu') {
-      try {
-        await tf.setBackend('cpu');
-        setModelStatus('CPU推理模式(兼容优先)...');
-        _modelDiag = 'backend=cpu;';
-      } catch (e) {
-        console.warn('CPU backend switch failed:', e);
-        _modelDiag = 'backend=webgl;';
-      }
-    }
-  }
 
   // 移动端网络慢，给更长的超时时间
   var timeoutMs = isMobile ? 60000 : 30000;
@@ -244,7 +230,7 @@ async function preloadDetector() {
     'https://raw.githubusercontent.com/xiaomanZhang-tech/rope-skipping/main/models/movenet/model.json',
     'models/movenet/model.json'
   ];
-  var lastErr;
+  var lastErr, gpuRetried = false;
 
   for (let _mi = 0; _mi < modelUrls.length; _mi++) {
     if (_mi > 0) setModelStatus('线路' + (_mi + 1) + '失败，尝试下一线路...');
@@ -269,14 +255,23 @@ async function preloadDetector() {
       lastErr = err;
       _modelDiag += 'url' + _mi + '=' + err.message + ';';
       console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
+      // WebGL不兼容 → 强制CPU后端，重试同一URL
+      if (!gpuRetried && typeof tf !== 'undefined' && tf.getBackend() === 'webgl') {
+        gpuRetried = true;
+        setModelStatus('GPU不兼容，切换CPU模式重试...');
+        try { tf.disposeVariables(); } catch (e) {}
+        try { await tf.setBackend('cpu'); } catch (e) {}
+        _mi--;
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
       STATE.detector = null;
       STATE.motionMode = true;
     }
   }
   STATE.modelLoadAttempted = true;
-  var diagMsg = _modelDiag;
   setModelStatus('AI模型加载失败，使用运动检测备用方案');
-  console.warn('Model load diagnostic:', diagMsg);
+  console.warn('Model load diagnostic:', _modelDiag);
   STATE.modelLoading = false;
 }
 
