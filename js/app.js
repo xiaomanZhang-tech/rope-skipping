@@ -215,29 +215,37 @@ function requestCamera() {
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
-  setModelStatus('正在加载AI模型...');
-
-  try {
-    // 使用自托管模型文件，不依赖 tfhub.dev 外网访问
-    const cfg = {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-      modelUrl: 'models/movenet/model.json'
-    };
-    STATE.detector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet, cfg
-    );
-    STATE.modelLoadAttempted = true;
-    STATE.motionMode = false;
-    setModelStatus('✓ AI骨骼识别 已就绪');
-    console.log('MoveNet loaded (self-hosted)');
-  } catch (err) {
-    STATE.modelLoadAttempted = true;
-    STATE.detector = null;
-    STATE.motionMode = true;
-    setModelStatus('AI模型加载失败，使用运动检测备用方案');
-    console.error('Model load failed:', err);
+  setModelStatus('正在加载AI模型（约4.4MB）...');
+  // 移动端可能较慢，最多尝试2次
+  for (let _attempt = 0; _attempt < 2; _attempt++) {
+    if (_attempt > 0) {
+      setModelStatus('重试加载模型...');
+      await new Promise(r => setTimeout(r, 500));
+    }
+    try {
+      const cfg = {
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+        modelUrl: 'models/movenet/model.json'
+      };
+      // 30秒超时（移动端4.4MB可能较慢）
+      STATE.detector = await Promise.race([
+        poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000))
+      ]);
+      STATE.modelLoadAttempted = true;
+      STATE.motionMode = false;
+      setModelStatus('✓ AI骨骼识别 已就绪');
+      console.log('MoveNet loaded (self-hosted)');
+      STATE.modelLoading = false;
+      return;
+    } catch (err) {
+      console.error('Model load attempt ' + (_attempt + 1) + ' failed:', err);
+      STATE.detector = null;
+      STATE.motionMode = true;
+    }
   }
-
+  STATE.modelLoadAttempted = true;
+  setModelStatus('AI模型加载失败，使用运动检测备用方案');
   STATE.modelLoading = false;
 }
 
