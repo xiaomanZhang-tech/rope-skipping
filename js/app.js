@@ -913,14 +913,14 @@ function detectMotionFallback(video) {
   // 起跳检测阈值
   const launchTh = Math.max(3, ms.noiseLevel * 0.6);
   const legMotionTh = Math.max(2, ms.noiseLevel * 0.4);
-  const vertUpTh = 0.04;     // 垂直向上速度阈值（原0.08）
-  const vertDownTh = -0.03;  // 垂直向下速度阈值（原-0.05）
   const legRatioTh = 0.35;   // 腿部运动占比（防头部晃动误计）
+  const vertDownTh = -0.03;  // 垂直向下速度阈值（仅用于launch/air阶段降级判断）
 
   // 调试展示
   updateDebug('lift', legMotion.toFixed(1));
   updateDebug('th', launchTh.toFixed(1));
   updateDebug('gnd', ms.noiseLevel.toFixed(1));
+  updateDebug('vrt', vertVel.toFixed(3));
   updateDebug('mdl', '帧差+v');
 
   // === 第5步：三阶段状态机 ===
@@ -932,8 +932,9 @@ function detectMotionFallback(video) {
 
   switch (ms.phase) {
     case 'ground':
-      // 需要连续多帧腿动+向上才能触发
-      if (legMotion > legMotionTh && vertVel > vertUpTh && legRatio > legRatioTh) {
+      // 腿动(幅度和占比)达到阈值即触发起跳
+      // 注意: vertVel是全图平均，信号被背景稀释趋近于0，不能用于判定
+      if (legMotion > legMotionTh && legRatio > legRatioTh) {
         ms.groundFrames++;
       } else {
         ms.groundFrames = 0;
