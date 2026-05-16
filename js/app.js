@@ -211,7 +211,7 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载（优先CDN，自托管文件做后备） ============
+// ============ AI 模型加载（CDN→自托管，WebGL→CPU降级） ============
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
@@ -222,7 +222,7 @@ async function preloadDetector() {
     'https://gcore.jsdelivr.net/gh/xiaomanZhang-tech/rope-skipping@main/models/movenet/model.json',
     'models/movenet/model.json'
   ];
-  var lastErr;
+  var lastErr, gpuRetried = false;
 
   for (let _mi = 0; _mi < modelUrls.length; _mi++) {
     if (_mi > 0) setModelStatus('CDN模型失败，尝试自托管...');
@@ -234,7 +234,7 @@ async function preloadDetector() {
       STATE.detector = await Promise.race([
         poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('超时(>'+ (30) +'s)')), 30000)
+          setTimeout(() => reject(new Error('超时(>30s)')), 30000)
         )
       ]);
       STATE.modelLoadAttempted = true;
@@ -246,6 +246,16 @@ async function preloadDetector() {
     } catch (err) {
       lastErr = err;
       console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
+      // WebGL不兼容 → 强制CPU后端，重试同一URL
+      if (!gpuRetried && typeof tf !== 'undefined' && tf.getBackend() === 'webgl') {
+        gpuRetried = true;
+        setModelStatus('GPU加速不兼容，切换CPU模式重试...');
+        try { tf.disposeVariables(); } catch (e) {}
+        try { await tf.setBackend('cpu'); } catch (e) {}
+        _mi--;
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
       STATE.detector = null;
       STATE.motionMode = true;
     }
