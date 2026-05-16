@@ -76,10 +76,13 @@
       <p>无相机权限无法使用计数功能</p>
       <button class="btn btn-secondary" onclick="requestCamera()">前往开启权限</button>
     </div>
+    <div class="prepare-status" id="model-status">准备中...</div>
+    <div id="body-status" class="body-status body-warn hidden">扫描身体中...</div>
     <div class="prepare-actions">
       <button id="btn-start" class="btn btn-primary btn-large" onclick="startExercise()" disabled>
         <span id="btn-start-text">准备中...</span>
       </button>
+      <button id="btn-retry-ai" class="btn btn-outline" onclick="retryModelLoad()" style="display:none;margin-top:10px;width:100%;">重新加载AI模型</button>
     </div>
   </div>
 </div>
@@ -90,6 +93,7 @@
   <div class="exercise-overlay">
     <video id="exercise-video" autoplay playsinline muted></video>
     <canvas id="exercise-canvas"></canvas>
+    <canvas id="guide-canvas"></canvas>
   </div>
   <div class="exercise-ui">
     <div class="exercise-timer" id="timer-display">60</div>
@@ -189,8 +193,41 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<!-- ========== AI 库加载（多CDN容错） ========== -->
+<script>
+// 多CDN容错加载器，兼容中国大陆网络环境
+(function() {
+  function loadScript(urls, idx, callback) {
+    if (idx >= urls.length) { callback(false); return; }
+    var s = document.createElement('script');
+    s.src = urls[idx];
+    s.onload = function() { callback(true); };
+    s.onerror = function() { loadScript(urls, idx + 1, callback); };
+    document.head.appendChild(s);
+  }
+
+  window._bootLibs = function(cb) {
+    var loaded = 0, total = 2, ok = true;
+    var done = function(success) {
+      if (!success) ok = false;
+      loaded++;
+      if (loaded >= total) cb(ok);
+    };
+    // TF.js CDN 列表（按速度排序）
+    loadScript([
+      'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js',
+      'https://unpkg.com/@tensorflow/tfjs@4.17.0/dist/tf.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/tensorflow/4.17.0/tf.min.js'
+    ], 0, done);
+    // Pose-detection CDN 列表
+    loadScript([
+      'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js',
+      'https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/pose-detection/2.1.3/pose-detection.min.js'
+    ], 0, done);
+  };
+})();
+</script>
 <script src="js/app.js"></script>
 </body>
 </html>

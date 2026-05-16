@@ -30,9 +30,14 @@ const STATE = {
   isJumping: false,
   jumpCooldown: 0,
   recentAnkleY: [],
+  vBuf: [],           // 速度计算缓冲区
+  jumpPeak: 0,        // 当前跳跃最高幅度
+  jumpFrames: 0,      // 跳跃持续帧数
   prevFrameData: null,    // 备用方案的上一帧数据
   motionMode: false,      // 是否使用无AI运动检测
   modelLoadAttempted: false,
+  bodyDetected: false,    // 是否已检测到人体
+  autoStartCountdown: -1, // -1=未触发, 0=倒计时结束, >0=倒计时中(半秒步长)
   dbgShow: true,           // 调试面板
 
   // 音频
@@ -47,7 +52,19 @@ const STATE = {
 // ============ 初始化 ============
 document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
-  preloadDetector();
+  // 加载CDN AI库（库加载完成后自动调用 preloadDetector）
+  if (window._bootLibs) {
+    window._bootLibs(function(success) {
+      if (success) preloadDetector();
+      else {
+        STATE.motionMode = true;
+        STATE.modelLoadAttempted = true;
+        setModelStatus('CDN加载失败，使用运动检测备用方案');
+      }
+    });
+  } else {
+    preloadDetector();
+  }
 });
 
 // ============ 页面导航 ============
@@ -74,6 +91,7 @@ function switchPage(page) {
 
   if (page === 'prepare') initPreparePage();
   if (page === 'history') renderHistory();
+  if (page !== 'prepare') stopBodyPreview();
 }
 
 // ============ 首页 ============
@@ -85,11 +103,42 @@ async function initPreparePage() {
   const permissionPrompt = document.getElementById('permission-prompt');
 
   btn.disabled = true;
-  document.getElementById('btn-start-text').textContent = '加载模型中...';
 
-  // 检查模型是否已加载
-  if (!STATE.detector) {
-    await preloadDetector();
+  // 尝试加载AI库（如果CDN失败则走纯运动检测）
+  if (typeof poseDetection === 'undefined') {
+    document.getElementById('btn-start-text').textContent = 'CDN加载中...';
+    await new Promise(function(resolve) {
+      // 等待最长时间4秒让CDN加载
+      var check = function() {
+        if (typeof poseDetection !== 'undefined') { resolve(); return; }
+        setTimeout(check, 200);
+      };
+      setTimeout(function() { resolve(); }, 4000);
+      check();
+    });
+  }
+
+  if (typeof poseDetection === 'undefined') {
+    STATE.motionMode = true;
+    STATE.modelLoadAttempted = true;
+    setModelStatus('AI库加载失败，使用运动检测备用方案');
+  } else {
+    // 等待模型加载完成（_bootLibs 可能已在后台触发 preloadDetector）
+    for (let _mi = 0; _mi < 50; _mi++) {
+      if (!STATE.modelLoading || STATE.modelLoadAttempted || STATE.detector) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!STATE.detector && !STATE.modelLoadAttempted) {
+      await preloadDetector();
+    }
+  }
+
+  // 显示重试按钮(如果模型加载失败)
+  const retryBtn = document.getElementById('btn-retry-ai');
+  if (STATE.detector) {
+    if (retryBtn) retryBtn.style.display = 'none';
+  } else if (STATE.modelLoadAttempted) {
+    if (retryBtn) retryBtn.style.display = 'block';
   }
 
   permissionPrompt.classList.add('hidden');
@@ -97,9 +146,10 @@ async function initPreparePage() {
   // 尝试开启相机
   try {
     await startCamera('prepare');
-    btn.disabled = false;
-    document.getElementById('btn-start-text').textContent = '开始跳绳';
     document.getElementById('camera-placeholder').classList.add('hidden');
+    // 启动身体检测预览
+    startBodyPreview();
+    // 按钮状态由 bodyPreview 控制
   } catch (err) {
     console.error('Camera error:', err);
     permissionPrompt.classList.remove('hidden');
@@ -120,7 +170,7 @@ async function startCamera(target) {
   const constraints = {
     video: {
       facingMode: STATE.usingFrontCamera ? 'user' : 'environment',
-      width: { ideal: 480 },
+      width: { ideal: 640 },
       height: { ideal: 360 }
     },
     audio: false
@@ -161,32 +211,191 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载 ============
+// ============ AI 模型加载（自托管模型文件，无需外网） ============
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
+  setModelStatus('正在加载AI模型...');
 
   try {
-    // 使用 MoveNet 模型 - 单姿态检测，闪电版（适合移动端）
-    const detectorConfig = {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+    // 使用自托管模型文件，不依赖 tfhub.dev 外网访问
+    const cfg = {
+      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+      modelUrl: 'models/movenet/model.json'
     };
     STATE.detector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet,
-      detectorConfig
+      poseDetection.SupportedModels.MoveNet, cfg
     );
-    console.log('MoveNet 模型加载完成');
+    STATE.modelLoadAttempted = true;
+    STATE.motionMode = false;
+    setModelStatus('✓ AI骨骼识别 已就绪');
+    console.log('MoveNet loaded (self-hosted)');
   } catch (err) {
-    console.error('模型加载失败:', err);
+    STATE.modelLoadAttempted = true;
     STATE.detector = null;
+    STATE.motionMode = true;
+    setModelStatus('AI模型加载失败，使用运动检测备用方案');
+    console.error('Model load failed:', err);
   }
 
   STATE.modelLoading = false;
-  STATE.modelLoadAttempted = true;
+}
+
+function setModelStatus(msg) {
+  const el = document.getElementById('model-status');
+  if (el) el.textContent = msg;
+}
+
+function retryModelLoad() {
+  STATE.modelLoadAttempted = false;
+  STATE.detector = null;
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-start-text').textContent = '加载模型中...';
+  preloadDetector();
+}
+
+function getModeLabel() {
+  if (STATE.motionMode) return '备用方案(帧差)';
+  if (STATE.detector) return 'AI骨骼识别';
+  return '未就绪';
+}
+
+// ============ 身体检测预览（准备界面） ============
+let _bodyPreviewTimer = null;
+
+function startBodyPreview() {
+  stopBodyPreview();
+  _bodyPreviewTimer = setInterval(runBodyPreview, 500);
+  runBodyPreview();
+}
+
+function stopBodyPreview() {
+  STATE.autoStartCountdown = -1;
+  if (_bodyPreviewTimer) {
+    clearInterval(_bodyPreviewTimer);
+    _bodyPreviewTimer = null;
+  }
+  // 清理预览画布
+  const canvas = document.getElementById('pose-canvas');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  // 恢复按钮文字
+  const btn = document.getElementById('btn-start');
+  if (btn) {
+    btn.disabled = false;
+    document.getElementById('btn-start-text').textContent = '开始跳绳';
+  }
+  // 隐藏状态
+  const statusEl = document.getElementById('body-status');
+  if (statusEl) statusEl.classList.add('hidden');
+}
+
+async function runBodyPreview() {
+  const videoEl = document.getElementById('video');
+  if (!videoEl || !videoEl.readyState || !STATE.cameraReady) return;
+
+  const btn = document.getElementById('btn-start');
+  const statusEl = document.getElementById('body-status');
+  if (!statusEl) return;
+
+  if (STATE.detector && !STATE.motionMode) {
+    // === AI模式：检测骨骼点 ===
+    try {
+      const poses = await STATE.detector.estimatePoses(videoEl, {
+        flipHorizontal: STATE.usingFrontCamera
+      });
+      if (poses && poses.length > 0) {
+        const kp = poses[0].keypoints;
+        // 在画布上绘制骨骼
+        drawPose(document.getElementById('pose-canvas'), kp, videoEl.videoWidth, videoEl.videoHeight);
+
+        // 检查关键身体部位是否可见
+        const needed = [0, 5, 6, 11, 12, 15, 16]; // 鼻子、双肩、双胯、双脚踝
+        const visible = needed.filter(i => kp[i] && kp[i].score > 0.2).length;
+        const allVisible = visible === needed.length;
+
+        // 检查身体高度是否足够（脚踝在画面下半部分，鼻子在上半部分）
+        const nose = kp[0];
+        const la = kp[15], ra = kp[16];
+        const ankles = [];
+        if (la.score > 0.2) ankles.push(la);
+        if (ra.score > 0.2) ankles.push(ra);
+        const hasHeight = nose.score > 0.2 && ankles.length > 0
+          && nose.y < videoEl.videoHeight * 0.5
+          && ankles.some(a => a.y > videoEl.videoHeight * 0.5);
+
+        if (allVisible && hasHeight) {
+          // 检测到全身 → 自动倒计时开始
+          if (STATE.autoStartCountdown === -1 && !STATE.exerciseActive) {
+            STATE.autoStartCountdown = 6; // 6 ticks × 500ms = 3秒
+          }
+
+          if (STATE.autoStartCountdown === 0) {
+            // 倒计时结束，开始跳绳
+            STATE.autoStartCountdown = -1;
+            btn.disabled = true;
+            document.getElementById('btn-start-text').textContent = '开始！';
+            startExercise({skipCountdown: true});
+            return;
+          }
+
+          if (STATE.autoStartCountdown > 0) {
+            const secs = Math.ceil(STATE.autoStartCountdown / 2);
+            statusEl.className = 'body-status body-ok';
+            statusEl.innerHTML = `⏳ ${secs}`;
+            STATE.autoStartCountdown--;
+            btn.disabled = true;
+            document.getElementById('btn-start-text').textContent = '自动开始中...';
+          } else {
+            statusEl.className = 'body-status body-ok';
+            statusEl.innerHTML = '✓ 全身已检测  (骨骼识别)';
+            btn.disabled = false;
+            document.getElementById('btn-start-text').textContent = '开始跳绳';
+          }
+        } else {
+          // 身体不完整 → 取消倒计时
+          STATE.autoStartCountdown = -1;
+          if (visible >= 5) {
+            statusEl.className = 'body-status body-warn';
+            const msg = ankles.length === 0 ? '请后退，让脚部入镜' : '请后退，让全身入镜';
+            statusEl.innerHTML = '⚠ ' + msg;
+            btn.disabled = true;
+            document.getElementById('btn-start-text').textContent = '调整位置中...';
+          } else {
+            statusEl.className = 'body-status body-warn';
+            statusEl.innerHTML = '⚠ 未检测到完整身体';
+            btn.disabled = true;
+            document.getElementById('btn-start-text').textContent = '调整位置中...';
+          }
+        }
+        statusEl.classList.remove('hidden');
+      } else {
+        STATE.autoStartCountdown = -1;
+        statusEl.className = 'body-status body-warn';
+        statusEl.innerHTML = '⚠ 未检测到人体';
+        btn.disabled = true;
+        document.getElementById('btn-start-text').textContent = '请站到画面中央';
+        statusEl.classList.remove('hidden');
+      }
+    } catch (e) {
+      // 降级处理
+    }
+  } else {
+    // === 运动检测模式：简化提示 ===
+    statusEl.className = 'body-status body-warn';
+    statusEl.innerHTML = '运动检测模式（建议在AI模式下使用）';
+    statusEl.classList.remove('hidden');
+    btn.disabled = false;
+    document.getElementById('btn-start-text').textContent = '开始跳绳';
+  }
 }
 
 // ============ 运动核心逻辑 ============
-async function startExercise() {
+async function startExercise(options = {}) {
+  const skipCountdown = options.skipCountdown || false;
+
   // 切换到运动界面
   switchPage('exercise');
 
@@ -199,6 +408,7 @@ async function startExercise() {
   STATE.isJumping = false;
   STATE.landedSinceJump = false;
   STATE.jumpCooldown = 0;
+  STATE.bodyDetected = false;
   STATE.recentAnkleY = [];
 
   // UI 重置
@@ -219,6 +429,20 @@ async function startExercise() {
     return;
   }
 
+  // 显示模式信息
+  var modeLabel, modeColor;
+  if (STATE.detector && !STATE.motionMode) {
+    modeLabel = 'AI骨骼识别';
+    modeColor = '#4A90D9';
+  } else if (STATE.motionMode) {
+    modeLabel = '运动检测(备用)';
+    modeColor = '#FF8C42';
+  } else {
+    modeLabel = '基本检测';
+    modeColor = '#999';
+  }
+  document.getElementById('exercise-status').textContent = '⚡ ' + modeLabel;
+
   // 启动检测
   startDetection();
 
@@ -226,12 +450,33 @@ async function startExercise() {
   const dp = document.getElementById('dbg-panel');
   if (dp) dp.style.display = 'flex';
 
-  // 3-2-1 倒计时
-  await countdown321();
+  if (skipCountdown) {
+    // 准备页已确认身体，直接开始计时
+    // 但等待一帧确保运动界面检测到身体
+    await new Promise(r => setTimeout(r, 300));
+    // 隐藏引导框
+    var gc = document.getElementById('guide-canvas');
+    if (gc) gc.style.opacity = '0';
+    document.getElementById('exercise-status').textContent = '开始！';
+    startTimer();
+  } else {
+    // 等待检测到人体（最多5秒，超时也继续）
+    document.getElementById('exercise-status').textContent = '⏳ 正在识别身体...';
+    for (let _w = 0; _w < 50; _w++) {
+      if (STATE.bodyDetected) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // 识别到全身后隐藏引导框
+    var gc = document.getElementById('guide-canvas');
+    if (gc) gc.style.opacity = '0';
 
-  // 开始正式计时
-  document.getElementById('exercise-status').textContent = '开始！';
-  startTimer();
+    // 3-2-1 倒计时
+    await countdown321();
+
+    // 开始正式计时
+    document.getElementById('exercise-status').textContent = '开始！';
+    startTimer();
+  }
 }
 
 function countdown321() {
@@ -291,7 +536,7 @@ function startTimer() {
 }
 
 // ============ 跳跃检测（降频优化版）============
-// AI推理每120ms跑一次，骨骼绘制每240ms刷新一次
+// AI推理每80ms跑一次，骨骼绘制每240ms刷新一次
 // 运动检测复用离线画布，不再每帧创建新对象
 let _frameCount = 0;
 let _motionCanvas = null;
@@ -310,9 +555,12 @@ function startDetection() {
   // 运动检测复用画布（只创建一次）
   _motionCanvas = _motionCanvas || document.createElement('canvas');
 
-  // AI推理节流：最小间隔120ms
+  // 人形引导框（画一次即可）
+  let _guideDrawn = false;
+
+  // AI推理节流：最小间隔80ms
   let lastAiTime = 0;
-  const AI_INTERVAL = 120; // ms
+  const AI_INTERVAL = 60; // ms（原120→80→60ms）
   let drawSkip = 0;
 
   const detectFrame = async (now) => {
@@ -325,6 +573,12 @@ function startDetection() {
     }
 
     _frameCount++;
+
+    // 视频尺寸就绪后绘制一次人形引导框
+    if (!_guideDrawn && videoEl.videoWidth > 0) {
+      drawGuideSilhouette(document.getElementById('guide-canvas'), videoEl.videoWidth, videoEl.videoHeight);
+      _guideDrawn = true;
+    }
 
     if (!STATE.motionMode && STATE.detector) {
       // === AI模式：降频推理 ===
@@ -345,8 +599,8 @@ function startDetection() {
         } catch (_) {}
       }
     } else {
-      // === 备用方案：帧差运动检测（也降频到1/3帧） ===
-      if (_frameCount % 3 === 0) {
+      // === 备用方案：帧差运动检测（降频到1/2帧） ===
+      if (_frameCount % 2 === 0) {
         detectMotionFallback(videoEl);
       }
     }
@@ -373,137 +627,323 @@ function stopDetection() {
 }
 
 // ============ 跳跃计数算法 (AI骨骼模式) ============
-// 原理：追踪脚踝Y坐标，用最近N帧中的最大值作为"地面"参考。
-// 跳起时脚踝在画面中上移（Y减小），lift = groundY - currentAnkleY 为正值。
-// 落地后回到地面，lift ≈ 0。
-// 连续跳跃时，只要窗口中有至少1帧地面数据，maxY就能正确反映地面位置。
+// 优化版：双路径落地 + 降低门槛应对快跳
+// 起跳：脚踝上抬速度 + 幅度双重确认
+// 落地路径A（慢跳）：回到基线 + 下坠速度
+// 落地路径B（快跳）：未完全回基线但幅度显著回落 + 不再上升
+// 慢速晃动会被速度门过滤，不会误计
 function processJumpPose(keypoints, frameHeight) {
   if (STATE.isPaused || !STATE.exerciseActive) return;
 
-  // 获取脚踝 (15=左脚踝, 16=右脚踝)
-  // 降低置信度阈值到0.2，支持远距离低分辨率识别
   const CONF = 0.2;
-  const leftAnkle = keypoints[15];
-  const rightAnkle = keypoints[16];
-  const validAnkles = [];
-  if (leftAnkle.score > CONF) validAnkles.push(leftAnkle);
-  if (rightAnkle.score > CONF) validAnkles.push(rightAnkle);
-  if (validAnkles.length === 0) {
-    document.getElementById('exercise-status').textContent = '未检测到人体';
+  const la = keypoints[15], ra = keypoints[16];
+  const va = [];
+  if (la.score > CONF) va.push(la);
+  if (ra.score > CONF) va.push(ra);
+  if (va.length === 0) { document.getElementById('exercise-status').textContent = '未检测到人体'; return; }
+
+  // 全身检测检查（所有关键部位可见才允许开始）
+  if (!STATE.bodyDetected) {
+    const needed = [0, 5, 6, 11, 12, 15, 16];
+    const visible = needed.filter(i => keypoints[i] && keypoints[i].score > 0.2).length;
+    const allVisible = visible === needed.length;
+    const nose = keypoints[0];
+    const hasHeight = nose.score > 0.2
+      && nose.y < frameHeight * 0.5
+      && (la.score > 0.2 && la.y > frameHeight * 0.5 || ra.score > 0.2 && ra.y > frameHeight * 0.5);
+    if (allVisible && hasHeight) {
+      STATE.bodyDetected = true;
+      document.getElementById('exercise-status').textContent = '✓ 全身已识别';
+    } else if (visible >= 5) {
+      const msg = va.length === 0 ? '请后退，让脚部入镜' : '请调整位置，让全身入镜';
+      document.getElementById('exercise-status').textContent = '⚠ ' + msg;
+    } else {
+      document.getElementById('exercise-status').textContent = '⚠ 未检测到完整身体';
+    }
     return;
   }
+
   document.getElementById('exercise-status').textContent = '✓ 识别正常';
 
-  const avgAnkleY = validAnkles.reduce((s, a) => s + a.y, 0) / validAnkles.length;
+  const y = va.reduce((s, a) => s + a.y, 0) / va.length;
 
-  // === 计算身体高度（自适应阈值基准） ===
-  // 远距离时人物在画面中较小，用画面高度的一半做兜底
+  // 身体高度
   const nose = keypoints[0];
-  let bodyHeight = frameHeight * 0.55;
-  if (nose && nose.score > CONF) {
-    bodyHeight = avgAnkleY - nose.y;
-  } else {
+  let bh = frameHeight * 0.55;
+  if (nose && nose.score > CONF) bh = y - nose.y;
+  else {
     const ls = keypoints[5], rs = keypoints[6];
-    if (ls.score > CONF && rs.score > CONF) {
-      bodyHeight = avgAnkleY - (ls.y + rs.y) / 2;
-    }
+    if (ls.score > CONF && rs.score > CONF) bh = y - (ls.y + rs.y) / 2;
   }
-  // 如果身体高度异常小（远距离），用画面高度的比例兜底
-  if (bodyHeight < frameHeight * 0.12) bodyHeight = frameHeight * 0.55;
+  if (bh < frameHeight * 0.12) bh = frameHeight * 0.55;
 
-  // === 滑动窗口 + 最大值基线 ===
-  STATE.recentAnkleY.push(avgAnkleY);
-  if (STATE.recentAnkleY.length > 25) STATE.recentAnkleY.shift();
-  if (STATE.recentAnkleY.length < 10) return;
+  // === 速度计算（加权平滑，最近帧权重更大） ===
+  STATE.vBuf = STATE.vBuf || [];
+  STATE.vBuf.push(y);
+  if (STATE.vBuf.length > 3) STATE.vBuf.shift();
 
-  const groundY = Math.max(...STATE.recentAnkleY);
-  const lift = groundY - avgAnkleY;
+  let vel = 0;
+  if (STATE.vBuf.length === 3) {
+    vel = (STATE.vBuf[2] - STATE.vBuf[1]) * 0.6 + (STATE.vBuf[1] - STATE.vBuf[0]) * 0.4;
+  }
 
-  // 自适应阈值：身体高度的 3%，最小不低于 3px（适配远距离）
-  const jumpThresh = Math.max(3, Math.min(bodyHeight * 0.03, 20));
-  const landThresh = Math.max(1.5, bodyHeight * 0.006);
+  // === 位置基线（窗口缩小，更快适应姿态变化） ===
+  STATE.recentAnkleY.push(y);
+  if (STATE.recentAnkleY.length > 15) STATE.recentAnkleY.shift();
+  if (STATE.recentAnkleY.length < 8) return;
+
+  const ground = Math.max(...STATE.recentAnkleY);
+  const lift = ground - y;
+
+  // === 自适应阈值（降低门槛） ===
+  const velTh = Math.max(0.8, bh * 0.005);    // 起跳速度门
+  const ampTh = Math.max(2, bh * 0.012);      // 最小起跳幅度
+  const landTh = Math.max(1, bh * 0.004);     // 落地判定
 
   updateDebug('lift', lift.toFixed(0));
-  updateDebug('th', jumpThresh.toFixed(0));
-  updateDebug('gnd', groundY.toFixed(0));
+  updateDebug('th', ampTh.toFixed(0));
+  updateDebug('gnd', ground.toFixed(0));
   updateDebug('mdl', 'AI');
 
+  // === 状态机 ===
   if (!STATE.isJumping) {
-    if (lift > jumpThresh) {
+    // 起跳：速度向上 + 幅度足够
+    if (vel < -velTh && lift > ampTh) {
       STATE.isJumping = true;
+      STATE.jumpPeak = lift;
+      STATE.jumpFrames = 0;
     }
   } else {
-    if (lift < landThresh && STATE.jumpCooldown <= 0) {
+    STATE.jumpFrames = (STATE.jumpFrames || 0) + 1;
+    if (lift > STATE.jumpPeak) STATE.jumpPeak = lift;
+
+    // === 落地判定（双路径） ===
+    // 路径A（慢跳/标准）：回到基线 + 不下坠
+    const landedStrict = STATE.jumpPeak > ampTh && lift < landTh && vel >= 0;
+    // 路径B（快跳）：幅度回落 + 不再上升
+    const dropRatio = STATE.jumpPeak > 0 ? lift / STATE.jumpPeak : 1;
+    const landedFast = STATE.jumpPeak > ampTh * 1.2 && STATE.jumpFrames >= 2 && dropRatio < 0.7 && vel >= 0;
+
+    if ((landedStrict || landedFast) && STATE.jumpCooldown <= 0) {
       STATE.jumpCount++;
-      STATE.jumpCooldown = 12;
+      STATE.jumpCooldown = 3;   // 原14→5→3（60ms×3=180ms冷却）
       STATE.isJumping = false;
+      STATE.jumpPeak = 0;
+      STATE.jumpFrames = 0;
       updateJumpDisplay();
       playJumpSound();
       if (navigator.vibrate) navigator.vibrate(15);
+    }
+
+    // 超时重置（原30→15→10）
+    if (STATE.jumpFrames > 10) {
+      STATE.isJumping = false;
+      STATE.jumpPeak = 0;
+      STATE.jumpFrames = 0;
     }
   }
 
   if (STATE.jumpCooldown > 0) STATE.jumpCooldown--;
 }
 
-// ============ 备用方案：基于帧差运动检测 ============
-// 不需要AI模型，通过分析画面像素变化来检测跳跃。
-// 复用全局画布，每帧不创建新对象。
-let motionBaseline = null;
-let motionUp = false;
+// ============ 备用方案：增强型分层运动检测 ============
+// 将画面分为4个水平区域，追踪垂直方向的速度变化。
+// 跳跃模式 = 腿部区域先向上移动（速度↑）→ 再向下移动（速度↓）
+// 摇头、摆手等非跳跃动作会被速度模式和区域分析过滤掉
+//
+// 核心改进：
+// 1. 垂直速度追踪（不是简单的帧差量）
+// 2. 完整"起跳-腾空-落地"周期检测
+// 3. 腿部为主、全身协调为辅助判断
+// 4. 自适应阈值
+
+let _motionState = {
+  // 状态机
+  phase: 'ground',     // ground → launch → air → land → count
+  groundFrames: 0,
+  launchFrames: 0,
+  airFrames: 0,
+
+  // 运动量追踪（4个区域：头、上身、大腿、小腿）
+  zoneMotion: [0, 0, 0, 0],
+  prevFrame: null,
+
+  // 垂直运动追踪
+  verticalVel: 0,      // >0 = 向上, <0 = 向下
+  verticalAccum: [],    // 最近5帧的垂直运动
+  launchStrength: 0,
+
+  // 自适应阈值
+  noiseLevel: 5,
+  adaptCounter: 0,
+
+  // 光流追踪
+  lastBotY: null,
+  botVelocities: []
+};
 
 function detectMotionFallback(video) {
+  if (_frameCount > 20) STATE.bodyDetected = true;
   if (STATE.isPaused || !STATE.exerciseActive) return;
+  const ms = _motionState;
 
-  // 复用画布，极低分辨率
+  // === 第1步：采集降采样帧（80×60 = 4倍提升） ===
   const mc = _motionCanvas;
-  mc.width = 40; mc.height = 30;
+  mc.width = 80; mc.height = 60;
   const ctx = mc.getContext('2d');
-  ctx.drawImage(video, 0, 0, 40, 30);
-  const pixels = ctx.getImageData(0, 0, 40, 30).data;
+  ctx.drawImage(video, 0, 0, 80, 60);
+  const p = ctx.getImageData(0, 0, 80, 60).data;
 
-  // 只对比画面下半部分的亮度变化
-  const lowerStart = 40 * 15 * 4; // 第15行开始
-  let diff = 0, n = 0;
-  if (STATE.prevFrameData) {
-    for (let i = lowerStart; i < pixels.length; i += 8) {
-      const cur = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
-      const prev = (STATE.prevFrameData[i] + STATE.prevFrameData[i+1] + STATE.prevFrameData[i+2]) / 3;
-      diff += Math.abs(cur - prev);
-      n++;
+  // === 第2步：按4个水平区域计算运动量 ===
+  // 区域0: 头部 (rows 0-14)  区域1: 躯干 (rows 15-29)
+  // 区域2: 大腿 (rows 30-44) 区域3: 小腿/脚 (rows 45-59)
+  const zoneDiffs = [0, 0, 0, 0];
+  const zoneCounts = [0, 0, 0, 0];
+
+  // 垂直运动追踪：分别追踪每个区域的垂直方向移动
+  let totalVerticalMotion = 0;
+  let vMotionCount = 0;
+
+  if (ms.prevFrame) {
+    const prev = ms.prevFrame;
+    for (let y = 0; y < 60; y++) {
+      for (let x = 0; x < 80; x++) {
+        const i = (y * 80 + x) * 4;
+        const cur = (p[i] + p[i+1] + p[i+2]) / 3;
+        const prev = (prev[i] + prev[i+1] + prev[i+2]) / 3;
+        const d = Math.abs(cur - prev);
+
+        // 区域分配
+        const zone = Math.min(3, Math.floor(y / 15));
+        zoneDiffs[zone] += d;
+        zoneCounts[zone]++;
+
+        // 垂直运动：比较当前与上方像素的差异变化
+        if (y > 1 && y < 59) {
+          const up = (p[i - 80] + p[i - 80 + 1] + p[i - 80 + 2]) / 3;
+          const curV = cur - up;
+          const prevUp = (prev[i - 80] + prev[i - 80 + 1] + prev[i - 80 + 2]) / 3;
+          const prevV = prev - prevUp;
+          totalVerticalMotion += (curV - prevV);
+          vMotionCount++;
+        }
+      }
     }
-    diff = diff / n;
-  }
-  STATE.prevFrameData = new Uint8Array(pixels);
 
-  // 维护运动基线（按大小顺序插入，避免全排序）
-  motionBaseline = motionBaseline || [];
-  motionBaseline.push(diff);
-  if (motionBaseline.length > 60) motionBaseline.shift();
-  if (motionBaseline.length < 20) return;
-
-  // 取30%分位数（用部分排序替代全排序）
-  const sorted = motionBaseline.slice().sort((a, b) => a - b);
-  const quietLevel = sorted[Math.floor(sorted.length * 0.3)];
-
-  const isMoving = diff > quietLevel * 2.5 && diff > 3;
-
-  updateDebug('lift', diff.toFixed(1));
-  updateDebug('th', (quietLevel * 2.5).toFixed(1));
-
-  // 状态机
-  if (!motionUp && isMoving) {
-    motionUp = true;
-  } else if (motionUp && !isMoving) {
-    motionUp = false;
-    if (STATE.jumpCooldown <= 0) {
-      STATE.jumpCount++;
-      STATE.jumpCooldown = 8;
-      updateJumpDisplay();
-      playJumpSound();
+    // 归一化
+    for (let z = 0; z < 4; z++) {
+      zoneDiffs[z] = zoneCounts[z] > 0 ? zoneDiffs[z] / zoneCounts[z] : 0;
     }
+
+    // 垂直运动（正值=向上，负值=向下）
+    const avgVert = vMotionCount > 0 ? totalVerticalMotion / vMotionCount : 0;
+
+    // 平滑垂直速度（指数移动平均）
+    ms.verticalVel = ms.verticalVel * 0.6 + avgVert * 0.4;
+
+    // 累积垂直运动（最近5帧）
+    ms.verticalAccum.push(avgVert);
+    if (ms.verticalAccum.length > 5) ms.verticalAccum.shift();
+  }
+  ms.prevFrame = new Uint8Array(p);
+
+  // === 第3步：计算关键指标 ===
+  const legMotion = (zoneDiffs[2] + zoneDiffs[3]) / 2;    // 腿部运动量
+  const bodyMotion = (zoneDiffs[1] + zoneDiffs[2]) / 2;    // 身体运动量
+  const headMotion = zoneDiffs[0];                           // 头部运动量
+
+  // 腿部运动占比（过滤头部晃动：头动腿不动 = 无效）
+  const legRatio = bodyMotion > 0 ? legMotion / bodyMotion : 0;
+
+  // 垂直动能（起跳时腿部明显向上）
+  const vertVel = ms.verticalVel;
+
+  // 垂直加速度（正=加速向上，负=减速向上或下落）
+  const vertAcc = ms.verticalAccum.length >= 3
+    ? (ms.verticalAccum[ms.verticalAccum.length - 1] - ms.verticalAccum[0]) / ms.verticalAccum.length
+    : 0;
+
+  // === 第4步：自适应阈值 ===
+  // 根据当前噪声水平动态调整
+  ms.adaptCounter++;
+  if (ms.adaptCounter % 15 === 0 && STATE.timeRemaining < 58) {
+    const noise = legMotion * 0.3 + headMotion * 0.7;
+    ms.noiseLevel = Math.max(3, Math.min(20, ms.noiseLevel * 0.9 + noise * 0.1));
   }
 
+  // 起跳检测阈值
+  const launchTh = Math.max(3, ms.noiseLevel * 0.6);
+  const legMotionTh = Math.max(2, ms.noiseLevel * 0.4);
+  const vertUpTh = 0.04;     // 垂直向上速度阈值（原0.08）
+  const vertDownTh = -0.03;  // 垂直向下速度阈值（原-0.05）
+  const legRatioTh = 0.35;   // 腿部运动占比（防头部晃动误计）
+
+  // 调试展示
+  updateDebug('lift', legMotion.toFixed(1));
+  updateDebug('th', launchTh.toFixed(1));
+  updateDebug('gnd', ms.noiseLevel.toFixed(1));
+  updateDebug('mdl', '帧差+v');
+
+  // === 第5步：三阶段状态机 ===
+  // phase: ground(地面) → launch(起跳) → air(腾空) → land(落地) → count
+  //
+  // 起跳条件：腿部运动 + 垂直向上速度 + 腿部占比
+  // 落地条件：垂直向下速度 + 之前确实起跳了
+  // 摇头/摆手：腿部占比低 → 被过滤
+
+  switch (ms.phase) {
+    case 'ground':
+      // 需要连续多帧腿动+向上才能触发
+      if (legMotion > legMotionTh && vertVel > vertUpTh && legRatio > legRatioTh) {
+        ms.groundFrames++;
+      } else {
+        ms.groundFrames = 0;
+      }
+      if (ms.groundFrames >= 1) {
+        ms.phase = 'launch';
+        ms.launchFrames = 0;
+        ms.launchStrength = legMotion;
+        ms.groundFrames = 0;
+      }
+      break;
+
+    case 'launch':
+      ms.launchFrames++;
+      ms.launchStrength = Math.max(ms.launchStrength, legMotion);
+      // 起跳后等待垂直速度逆转（向上→向下）才进入落地阶段
+      // 或者超时保护
+      if (vertVel < vertDownTh || ms.launchFrames > 8) {
+        if (ms.launchStrength > launchTh) {
+          ms.phase = 'air';
+          ms.airFrames = 0;
+        } else {
+          ms.phase = 'ground'; // 假启动，不够强
+        }
+      }
+      break;
+
+    case 'air':
+      ms.airFrames++;
+      // 在空中等待下落信号：垂直速度向下 + 运动趋于平静
+      // 双路径：标准慢跳等向下速度，快跳运动回落即计数
+      var airSlow2 = vertVel < vertDownTh && legMotion < legMotionTh * 1.5;
+      var airFast2 = ms.airFrames >= 2 && legMotion < launchTh * 1.5;
+      if (airSlow2 || airFast2 || ms.airFrames > 6) {
+        // 计数！
+        if (STATE.jumpCooldown <= 0) {
+          STATE.jumpCount++;
+          STATE.jumpCooldown = 7;
+          updateJumpDisplay();
+          playJumpSound();
+          if (navigator.vibrate) navigator.vibrate(15);
+        }
+        ms.phase = 'ground';
+        ms.groundFrames = 0;
+      }
+      break;
+  }
+
+  // 冷却递减
   if (STATE.jumpCooldown > 0) STATE.jumpCooldown--;
 }
 
@@ -938,6 +1378,78 @@ function drawPose(canvas, keypoints, width, height) {
   }
 }
 
+// ============ 人形引导框（静态参考，帮助用户定位） ============
+function drawGuideSilhouette(canvas, _vw, _vh) {
+  if (!canvas) return;
+  // 使用CSS像素尺寸 × devicePixelRatio，在Retina屏上不模糊
+  const dpr = window.devicePixelRatio || 1;
+  // 如果canvas还未布局，降级到window尺寸
+  let cw = canvas.clientWidth;
+  let ch = canvas.clientHeight;
+  if (!cw || !ch) { cw = window.innerWidth; ch = window.innerHeight; }
+  canvas.width = cw * dpr;
+  canvas.height = ch * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  // 用CSS像素坐标绘制
+  const cx = cw / 2;
+  const gh = ch * 0.72;
+  const headR = gh * 0.09;
+  const topY = (ch - gh) / 2;
+  const headCx = cx;
+  const headCy = topY + headR;
+  const neckY = topY + headR * 2.2;
+  const shoulderY = neckY;
+  const shoulderW = headR * 1.7;
+  const hipY = neckY + gh * 0.35;
+  const hipW = headR * 1.3;
+  const footY = topY + gh;
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([8, 6]);
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(headCx, headCy, headR, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Torso (trapezoid)
+  ctx.beginPath();
+  ctx.moveTo(cx - shoulderW, shoulderY);
+  ctx.lineTo(cx + shoulderW, shoulderY);
+  ctx.lineTo(cx + hipW, hipY);
+  ctx.lineTo(cx - hipW, hipY);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Left arm
+  ctx.beginPath();
+  ctx.moveTo(cx - shoulderW, shoulderY);
+  ctx.lineTo(cx - shoulderW - headR * 1.2, shoulderY + gh * 0.2);
+  ctx.stroke();
+
+  // Right arm
+  ctx.beginPath();
+  ctx.moveTo(cx + shoulderW, shoulderY);
+  ctx.lineTo(cx + shoulderW + headR * 1.2, shoulderY + gh * 0.2);
+  ctx.stroke();
+
+  // Left leg
+  ctx.beginPath();
+  ctx.moveTo(cx - hipW * 0.6, hipY);
+  ctx.lineTo(cx - hipW * 1.0, footY);
+  ctx.stroke();
+
+  // Right leg
+  ctx.beginPath();
+  ctx.moveTo(cx + hipW * 0.6, hipY);
+  ctx.lineTo(cx + hipW * 1.0, footY);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+}
+
 // ============ 弹窗系统 ============
 function showModal(title, body) {
   document.getElementById('modal-title').textContent = title;
@@ -972,8 +1484,19 @@ function stopExercise() {
   STATE.isPaused = false;
   STATE.jumpCount = 0;
   STATE.timeRemaining = 60;
-  motionBaseline = null;
+  STATE.vBuf = [];
+  STATE.jumpPeak = 0;
+  STATE.jumpFrames = 0;
   STATE.prevFrameData = null;
+
+  // 重置运动检测状态机
+  _motionState = {
+    phase: 'ground', groundFrames: 0, launchFrames: 0, airFrames: 0,
+    zoneMotion: [0, 0, 0, 0],
+    prevFrame: null, verticalVel: 0, verticalAccum: [],
+    launchStrength: 0, noiseLevel: 5, adaptCounter: 0,
+    lastBotY: null, botVelocities: []
+  };
 
   const dp = document.getElementById('dbg-panel');
   if (dp) dp.style.display = 'none';
@@ -984,6 +1507,7 @@ function stopExercise() {
   }
 
   stopDetection();
+  stopBodyPreview();
   stopCamera();
 }
 
