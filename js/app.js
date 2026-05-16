@@ -211,33 +211,43 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载（移动端CPU推理，CDN→自托管） ============
+// ============ AI 模型加载（移动端CPU推理，多线路容错） ============
+var _modelDiag = '';
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
   setModelStatus('正在加载AI模型(约4.4MB)...');
+  _modelDiag = '';
 
-  // 部分手机WebGL与TF.js不兼容，移动端主动使用CPU后端（降速但稳定）
-  if (/Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+  var isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+  // 移动端主动使用CPU后端（部分手机WebGL与TF.js不兼容）
+  if (isMobile) {
     if (typeof tf !== 'undefined' && tf.getBackend() !== 'cpu') {
       try {
         await tf.setBackend('cpu');
         setModelStatus('CPU推理模式(兼容优先)...');
+        _modelDiag = 'backend=cpu;';
       } catch (e) {
         console.warn('CPU backend switch failed:', e);
+        _modelDiag = 'backend=webgl;';
       }
     }
   }
 
-  // 模型CDN URL列表（jsDelivr CDN > 自托管GitHub Pages）
+  // 移动端网络慢，给更长的超时时间
+  var timeoutMs = isMobile ? 60000 : 30000;
+
+  // 模型URL列表（多线路容错）
   const modelUrls = [
     'https://gcore.jsdelivr.net/gh/xiaomanZhang-tech/rope-skipping@main/models/movenet/model.json',
+    'https://raw.githubusercontent.com/xiaomanZhang-tech/rope-skipping/main/models/movenet/model.json',
     'models/movenet/model.json'
   ];
   var lastErr;
 
   for (let _mi = 0; _mi < modelUrls.length; _mi++) {
-    if (_mi > 0) setModelStatus('CDN模型失败，尝试自托管...');
+    if (_mi > 0) setModelStatus('线路' + (_mi + 1) + '失败，尝试下一线路...');
     try {
       const cfg = {
         modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
@@ -246,7 +256,7 @@ async function preloadDetector() {
       STATE.detector = await Promise.race([
         poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('超时(>30s)')), 30000)
+          setTimeout(() => reject(new Error('超时(>' + (timeoutMs/1000) + 's)')), timeoutMs)
         )
       ]);
       STATE.modelLoadAttempted = true;
@@ -257,13 +267,16 @@ async function preloadDetector() {
       return;
     } catch (err) {
       lastErr = err;
+      _modelDiag += 'url' + _mi + '=' + err.message + ';';
       console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
       STATE.detector = null;
       STATE.motionMode = true;
     }
   }
   STATE.modelLoadAttempted = true;
-  setModelStatus('AI模型加载失败(' + (lastErr ? lastErr.message : '所有线路均失败') + ')，使用运动检测备用方案');
+  var diagMsg = _modelDiag;
+  setModelStatus('AI模型加载失败，使用运动检测备用方案');
+  console.warn('Model load diagnostic:', diagMsg);
   STATE.modelLoading = false;
 }
 
