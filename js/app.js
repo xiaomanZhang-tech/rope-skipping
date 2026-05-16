@@ -211,18 +211,30 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载（CDN→自托管，WebGL→CPU降级） ============
+// ============ AI 模型加载（移动端CPU推理，CDN→自托管） ============
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
   setModelStatus('正在加载AI模型(约4.4MB)...');
+
+  // 部分手机WebGL与TF.js不兼容，移动端主动使用CPU后端（降速但稳定）
+  if (/Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+    if (typeof tf !== 'undefined' && tf.getBackend() !== 'cpu') {
+      try {
+        await tf.setBackend('cpu');
+        setModelStatus('CPU推理模式(兼容优先)...');
+      } catch (e) {
+        console.warn('CPU backend switch failed:', e);
+      }
+    }
+  }
 
   // 模型CDN URL列表（jsDelivr CDN > 自托管GitHub Pages）
   const modelUrls = [
     'https://gcore.jsdelivr.net/gh/xiaomanZhang-tech/rope-skipping@main/models/movenet/model.json',
     'models/movenet/model.json'
   ];
-  var lastErr, gpuRetried = false;
+  var lastErr;
 
   for (let _mi = 0; _mi < modelUrls.length; _mi++) {
     if (_mi > 0) setModelStatus('CDN模型失败，尝试自托管...');
@@ -246,16 +258,6 @@ async function preloadDetector() {
     } catch (err) {
       lastErr = err;
       console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
-      // WebGL不兼容 → 强制CPU后端，重试同一URL
-      if (!gpuRetried && typeof tf !== 'undefined' && tf.getBackend() === 'webgl') {
-        gpuRetried = true;
-        setModelStatus('GPU加速不兼容，切换CPU模式重试...');
-        try { tf.disposeVariables(); } catch (e) {}
-        try { await tf.setBackend('cpu'); } catch (e) {}
-        _mi--;
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
       STATE.detector = null;
       STATE.motionMode = true;
     }
