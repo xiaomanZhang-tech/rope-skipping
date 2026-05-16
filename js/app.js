@@ -217,27 +217,41 @@ async function preloadDetector() {
   STATE.modelLoading = true;
   setModelStatus('正在加载AI模型...');
 
-  try {
-    // 使用自托管模型文件，不依赖 tfhub.dev 外网访问
-    const cfg = {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-      modelUrl: 'models/movenet/model.json'
-    };
-    STATE.detector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet, cfg
-    );
-    STATE.modelLoadAttempted = true;
-    STATE.motionMode = false;
-    setModelStatus('✓ AI骨骼识别 已就绪');
-    console.log('MoveNet loaded (self-hosted)');
-  } catch (err) {
-    STATE.modelLoadAttempted = true;
-    STATE.detector = null;
-    STATE.motionMode = true;
-    setModelStatus('AI模型加载失败，使用运动检测备用方案');
-    console.error('Model load failed:', err);
-  }
+  // 模型URL列表（CDN > 自托管GitHub Pages）
+  const modelUrls = [
+    'https://gcore.jsdelivr.net/gh/xiaomanZhang-tech/rope-skipping@main/models/movenet/model.json',
+    'models/movenet/model.json'
+  ];
+  var lastErr;
 
+  for (let _mi = 0; _mi < modelUrls.length; _mi++) {
+    if (_mi > 0) setModelStatus('CDN失败，尝试本地模型...');
+    try {
+      const cfg = {
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+        modelUrl: modelUrls[_mi]
+      };
+      STATE.detector = await Promise.race([
+        poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('超时(>30s)')), 30000)
+        )
+      ]);
+      STATE.modelLoadAttempted = true;
+      STATE.motionMode = false;
+      setModelStatus('✓ AI骨骼识别 已就绪');
+      console.log('MoveNet loaded from:', modelUrls[_mi]);
+      STATE.modelLoading = false;
+      return;
+    } catch (err) {
+      lastErr = err;
+      console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
+      STATE.detector = null;
+      STATE.motionMode = true;
+    }
+  }
+  STATE.modelLoadAttempted = true;
+  setModelStatus('AI模型加载失败(' + (lastErr ? lastErr.message : '所有线路均失败') + ')，使用运动检测备用方案');
   STATE.modelLoading = false;
 }
 
@@ -894,7 +908,7 @@ function detectMotionFallback(video) {
   switch (ms.phase) {
     case 'ground':
       // 需要连续多帧腿动+向上才能触发
-      if (legMotion > legMotionTh && vertVel > vertUpTh && legRatio > legRatioTh) {
+      if (legMotion > legMotionTh && legRatio > legRatioTh) {
         ms.groundFrames++;
       } else {
         ms.groundFrames = 0;
