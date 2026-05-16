@@ -2,7 +2,7 @@
   "name": "爱上跳绳",
   "short_name": "爱上跳绳",
   "description": "AI智能跳绳计数，一分钟体质测试训练",
-  "start_url": "/",
+  "start_url": ".",
   "display": "standalone",
   "background_color": "#F0F8FF",
   "theme_color": "#4A90D9",
