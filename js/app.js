@@ -54,12 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
   // 加载CDN AI库（库加载完成后自动调用 preloadDetector）
   if (window._bootLibs) {
-    window._bootLibs(function(success, failInfo) {
+    window._bootLibs(function(success) {
       if (success) preloadDetector();
       else {
         STATE.motionMode = true;
         STATE.modelLoadAttempted = true;
-        setModelStatus('CDN加载失败[' + failInfo + ']，使用运动检测备用方案');
+        setModelStatus('CDN加载失败，使用运动检测备用方案');
       }
     });
   } else {
@@ -211,67 +211,33 @@ function requestCamera() {
   });
 }
 
-// ============ AI 模型加载（WebGL优先，出错降级CPU + 多线路容错） ============
-var _modelDiag = '';
+// ============ AI 模型加载（自托管模型文件，无需外网） ============
 async function preloadDetector() {
   if (STATE.detector || STATE.modelLoading) return;
   STATE.modelLoading = true;
-  setModelStatus('正在加载AI模型(约4.4MB)...');
-  _modelDiag = '';
+  setModelStatus('正在加载AI模型...');
 
-  var isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
-  // 移动端网络慢，给更长的超时时间
-  var timeoutMs = isMobile ? 60000 : 30000;
-
-  // 模型URL列表（多线路容错）
-  const modelUrls = [
-    'https://gcore.jsdelivr.net/gh/xiaomanZhang-tech/rope-skipping@main/models/movenet/model.json',
-    'https://raw.githubusercontent.com/xiaomanZhang-tech/rope-skipping/main/models/movenet/model.json',
-    'models/movenet/model.json'
-  ];
-  var lastErr, gpuRetried = false;
-
-  for (let _mi = 0; _mi < modelUrls.length; _mi++) {
-    if (_mi > 0) setModelStatus('线路' + (_mi + 1) + '失败，尝试下一线路...');
-    try {
-      const cfg = {
-        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-        modelUrl: modelUrls[_mi]
-      };
-      STATE.detector = await Promise.race([
-        poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, cfg),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('超时(>' + (timeoutMs/1000) + 's)')), timeoutMs)
-        )
-      ]);
-      STATE.modelLoadAttempted = true;
-      STATE.motionMode = false;
-      setModelStatus('✓ AI骨骼识别 已就绪');
-      console.log('MoveNet loaded from:', modelUrls[_mi]);
-      STATE.modelLoading = false;
-      return;
-    } catch (err) {
-      lastErr = err;
-      _modelDiag += 'url' + _mi + '=' + err.message + ';';
-      console.error('Model URL ' + modelUrls[_mi] + ' failed:', err);
-      // WebGL不兼容 → 强制CPU后端，重试同一URL
-      if (!gpuRetried && typeof tf !== 'undefined' && tf.getBackend() === 'webgl') {
-        gpuRetried = true;
-        setModelStatus('GPU不兼容，切换CPU模式重试...');
-        try { tf.disposeVariables(); } catch (e) {}
-        try { await tf.setBackend('cpu'); } catch (e) {}
-        _mi--;
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      STATE.detector = null;
-      STATE.motionMode = true;
-    }
+  try {
+    // 使用自托管模型文件，不依赖 tfhub.dev 外网访问
+    const cfg = {
+      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+      modelUrl: 'models/movenet/model.json'
+    };
+    STATE.detector = await poseDetection.createDetector(
+      poseDetection.SupportedModels.MoveNet, cfg
+    );
+    STATE.modelLoadAttempted = true;
+    STATE.motionMode = false;
+    setModelStatus('✓ AI骨骼识别 已就绪');
+    console.log('MoveNet loaded (self-hosted)');
+  } catch (err) {
+    STATE.modelLoadAttempted = true;
+    STATE.detector = null;
+    STATE.motionMode = true;
+    setModelStatus('AI模型加载失败，使用运动检测备用方案');
+    console.error('Model load failed:', err);
   }
-  STATE.modelLoadAttempted = true;
-  setModelStatus('AI模型加载失败，使用运动检测备用方案');
-  console.warn('Model load diagnostic:', _modelDiag);
+
   STATE.modelLoading = false;
 }
 
@@ -908,14 +874,14 @@ function detectMotionFallback(video) {
   // 起跳检测阈值
   const launchTh = Math.max(3, ms.noiseLevel * 0.6);
   const legMotionTh = Math.max(2, ms.noiseLevel * 0.4);
+  const vertUpTh = 0.04;     // 垂直向上速度阈值（原0.08）
+  const vertDownTh = -0.03;  // 垂直向下速度阈值（原-0.05）
   const legRatioTh = 0.35;   // 腿部运动占比（防头部晃动误计）
-  const vertDownTh = -0.03;  // 垂直向下速度阈值（仅用于launch/air阶段降级判断）
 
   // 调试展示
   updateDebug('lift', legMotion.toFixed(1));
   updateDebug('th', launchTh.toFixed(1));
   updateDebug('gnd', ms.noiseLevel.toFixed(1));
-  updateDebug('vrt', vertVel.toFixed(3));
   updateDebug('mdl', '帧差+v');
 
   // === 第5步：三阶段状态机 ===
@@ -927,9 +893,8 @@ function detectMotionFallback(video) {
 
   switch (ms.phase) {
     case 'ground':
-      // 腿动(幅度和占比)达到阈值即触发起跳
-      // 注意: vertVel是全图平均，信号被背景稀释趋近于0，不能用于判定
-      if (legMotion > legMotionTh && legRatio > legRatioTh) {
+      // 需要连续多帧腿动+向上才能触发
+      if (legMotion > legMotionTh && vertVel > vertUpTh && legRatio > legRatioTh) {
         ms.groundFrames++;
       } else {
         ms.groundFrames = 0;
